@@ -28,6 +28,7 @@
 #define _DRM_MODE_H
 
 #include "drm.h"
+#include <stdbool.h>
 
 #if defined(__cplusplus)
 extern "C" {
@@ -1445,6 +1446,142 @@ struct drm_mode_rect {
 struct drm_mode_closefb {
 	__u32 fb_id;
 	__u32 pad;
+};
+
+/**
+ * enum drm_mode_histogram
+ *
+ * @DRM_MODE_HISTOGRAM_HSV_MAX_RGB:
+ * Maximum resolution at present 10k, 10240x4320 = 44236800
+ * can be denoted in 25bits. With an additional 7 bits in buffer each bin
+ * can be a u32 value.
+ * For SDL, Maximum value of max(RGB) is 255, so max 255 bins.
+ * If the most significant 5 bits are considered, then bins = 2^5
+ * will be 32 bins.
+ * For HDR, maximum value of max(RGB) is 65535, so max 65535 bins.
+ * For illustration consider a full RED image of 10k resolution considering all
+ * 8 bits histogram would look like hist[255] = {0,0,....44236800} with SDR
+ * plane similarly with HDR the same would look like hist[65535] =
+ * {0,0,0,....44236800}
+ */
+enum drm_mode_histogram {
+	DRM_MODE_HISTOGRAM_HSV_MAX_RGB = 0x01,
+};
+
+/**
+ * struct drm_histogram_caps
+ *
+ * @histogram_mode: histogram generation modes, defined in the
+ *		    enum drm_mode_histogram
+ * @bins_count: number of bins for a chosen histogram mode. For illustration
+ *		refer the above defined histogram mode.
+ */
+struct drm_histogram_caps {
+	__u32 histogram_mode;
+	__u32 bins_count;
+};
+
+/**
+ * struct drm_histogram_config
+ *
+ * @hist_mode_data: address to the histogram mode specific data if any
+ * @nr_hist_mode_data: number of elements pointed by the address in
+ *		       hist_mode_data
+ * @hist_mode: histogram mode(HSV max(RGB), RGB, LUMA etc)
+ * @enable: flag to enable/disable histogram
+ */
+struct drm_histogram_config {
+	__u64 hist_mode_data;
+	__u32 nr_hist_mode_data;
+	enum drm_mode_histogram hist_mode;
+	bool enable;
+};
+
+/**
+ * struct drm_histogram
+ *
+ * @config: histogram configuration data pointed by struct drm_histogram_config
+ * @nr_elements: number of bins in the histogram.
+ * @max_rgb: array of max(RGB) data that consists of histogram data.
+ *	      Histogram is an array of bins. Data format for each bin depends
+ *	      on the histogram mode. Refer to the above histogram modes for
+ *	      more information.
+ */
+struct drm_histogram {
+	struct drm_histogram_config config;
+	__u32 nr_elements;
+	union {
+		/* Case: max(RGB) */
+		__u32 max_rgb[255];
+	};
+};
+
+/**
+ * enum drm_iet_mode
+ * @DRM_MODE_IET_LOOKUP_LUT:
+ * LUT values are points on exponential graph with x axis and y-axis y=f(x)
+ * This f(x) can be the algorithm, defined by the user space algorithm.
+ * When this LUT table is passed to the hardware it signifies how the hardware
+ * should use this table to get the LUT values. In this mode its direct lookup
+ * table. x-axis corresponds to input pixel value and y-axis corresponds to
+ * the output pixel value.
+ *
+ * @DRM_MODE_IET_MULTIPLICATIVE:
+ * LUT values, x and y are points on negative exponential graph with
+ * x-axis and y-axis (y = y/x). The value passed by the user will be
+ * in y/x i.e OutPixel/InPixel. X co-ordinate proportional to pixel value
+ * and Y-cordinate is the multiplier factor, i.e x-axis in pixels and
+ * y-axis is OutPixel/InPixel. so upon multiplying x, y is obtained,
+ * hence multiplicative.
+ * The format of LUT can at max be 8.24(8integer 24 fractional)
+ * represented by u32. 32bit is the container and if 16.16 is chosen
+ * then it doesn't make sense to boost the pixel by 2^16. Hence set aside
+ * 8bit for integer 2^8 thereby boosting the pixel by a value 255 which
+ * itself is a huge boost factor. Remaining 24bits out of the 32bit
+ * container is fractional part. This is also optimal for implementing
+ * in the hardware.
+ * Depending on the hardware capability and exponent mantissa can be
+ * chosen within this limits.
+ */
+enum drm_iet_mode {
+	DRM_MODE_IET_LOOKUP_LUT = 0x01,
+	DRM_MODE_IET_MULTIPLICATIVE = 0x02,
+};
+
+/**
+ * struct drm_iet_caps
+ *
+ * @iet_mode: pixel factor enhancement modes defined in enum drm_iet_mode.
+ *	      Multiple modes can be supported by hardware, the value can be
+ *	      ORed.
+ * @iet_sample_format: holds the address of an array of u32 LUT sample formats
+ *		       depending on the hardware capability. Max being 8.24
+ *		       Doing a bitwise AND will get the present sample.
+ *		       Ex: for 1 integer 9 fraction AND with 0x10001FF
+ * @nr_iet_sample_formats: number of iet_sample_formsts supported by the
+ *			   hardware
+ * @nr_iet_lut_entries: number of LUT entries
+ */
+struct drm_iet_caps {
+	__u32 iet_mode;
+	__u64 iet_sample_format;
+	__u32 nr_iet_sample_formats;
+	__u32 nr_iet_lut_entries;
+};
+
+/**
+ * struct drm_iet_1dlut_sample
+ * @iet_lut: the address in the field describes the format of the data
+ *		corresponding to the @iet_mode
+ *		In case of direct lookup this is NULL, in case of
+ *		multiplicative mode LUT exponent and mantissa format.
+ * @nr_elements: number of entries pointed by the data @iet_lut
+ * @iet_mode: image enhancement mode, this will also convey the channel.
+ */
+struct drm_iet_1dlut_sample {
+	__u64 iet_lut;
+	__u32 nr_elements;
+	enum drm_iet_mode iet_mode;
 };
 
 #if defined(__cplusplus)
