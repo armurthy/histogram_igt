@@ -43,6 +43,7 @@ test_progs = [
 	'kms_getfb',
 	'kms_hdmi_inject',
 	'kms_hdr',
+	'kms_histogram',
 	'kms_invalid_mode',
 	'kms_lease',
 	'kms_multipipe_modeset',
