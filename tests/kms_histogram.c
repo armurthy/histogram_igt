@@ -29,6 +29,8 @@
 #define GLOBAL_HIST_ENABLE		1
 #define GLOBAL_HIST_DELAY		2
 #define FLIP_COUNT			20
+#define SQUARE_SIZE			100
+#define SQUARE_OFFSET			100
 
 /**
  * SUBTEST: global-basic
@@ -48,6 +50,10 @@
  * Description: Test to enable histogram, flip color fbs, wait for histogram event
  *		and then read the histogram data and enhance pixels by multiplying
  *		by a pixel factor using algo
+ *
+ * SUBTEST: global-selective-fetch
+ * Description: Test to enable global histogram, update SF clip, read histogram blob
+ *              and enhances the pixels by multiplying by a pixel factor using GHE algo.
  */
 
 IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
@@ -56,6 +62,7 @@ typedef struct data {
 	igt_display_t display;
 	int drm_fd;
 	igt_fb_t fb[5];
+	bool selective_fetch;
 } data_t;
 
 typedef void (*test_t)(data_t*, enum pipe, igt_output_t*, drmModePropertyBlobRes*);
@@ -81,6 +88,14 @@ static void enable_and_verify_global_histogram(data_t *data, enum pipe pipe)
 	histogram_config = malloc(sizeof(struct drm_histogram_config));
 	histogram_config->hist_mode = histogram_caps->histogram_mode;
 	histogram_config->enable = GLOBAL_HIST_ENABLE;
+
+	/* If SelectiveFetch test is enabled set the damage area */
+	if (data->slective_fetch) {
+		histogram_config->sf = true;
+		histogram_config->clip.x1 = clip.y1 = SQUARE_OFFSET;
+		histogram_config->clip.x2 = clip.y2 = SQUARE_OFFSET + SQUARE_SIZE;
+	}
+
 	igt_crtc_replace_prop_blob(pipe_t, IGT_CRTC_HISTOGRAM_ENABLE, histogram_config, sizeof(*histogram_config));
 	igt_display_commit2(&data->display, COMMIT_ATOMIC);
 
@@ -373,6 +388,12 @@ int igt_main()
 	igt_subtest_with_dynamic("global-color")
 		run_tests_for_global_histogram(&data, true, NULL);
 
+	igt_describe("Test to enable histogram, selective fetch & flip color fbs, "
+		     "wait for histogram event and then read the histogram data.");
+	igt_subtest_with_dynamic("global-color-selctive-fetch") {
+		data->selective_fetch = true;
+		run_tests_for_global_histogram(&data, true, NULL);
+	}
 #if 0
 	igt_describe("Test to enable histogram, flip monochrome fbs, wait for histogram "
 		     "event and then read the histogram data and enhance pixels by multiplying "
