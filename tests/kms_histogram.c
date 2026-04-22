@@ -22,6 +22,10 @@
 #include "igt.h"
 #include "igt_vec.h"
 
+#ifdef HAVE_LIBGHE
+#include <ghe/ghe.h>
+#endif
+
 #define GLOBAL_HIST_DISABLE		0
 #define GLOBAL_HIST_ENABLE		1
 #define GLOBAL_HIST_DELAY		2
@@ -37,6 +41,16 @@
  * SUBTEST: global-color
  * Description: Test to enable histogram, flip color fbs, wait for
  *		histogram event and then read the histogram data
+ *
+ * SUBTEST: algo-basic
+ * Description: Test to enable histogram, flip monochrome fbs, wait for
+ *		histogram event and then read the histogram data and enhance pixels by
+ *		multiplying by a pixel factor using algo
+ *
+ * SUBTEST: algo-color
+ * Description: Test to enable histogram, flip color fbs, wait for histogram event
+ *		and then read the histogram data and enhance pixels by multiplying
+ *		by a pixel factor using algo
  */
 
 IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
@@ -224,6 +238,104 @@ static void read_global_histogram(data_t *data, enum pipe pipe,
 		igt_debug("Histogram[%d] = %u\n", i, histogram_ptr->max_rgb[i]);
 }
 
+#ifdef HAVE_LIBGHE
+static void set_pixel_factor(data_t *data, enum pipe pipe, uint32_t *ietlutentries, size_t size)
+{
+	uint32_t i;
+	igt_crtc_t *crtc;
+	struct drm_iet_1dlut_sample iet_sample = {0};
+
+	crtc = igt_crtc_for_pipe(&data->display, pipe);
+
+	for (i = 0; i < size; i++) {
+		/* Displaying IET LUT */
+		igt_debug("IET LUT Entry[%d] = %u\n", i, ietlutentries[i]);
+	}
+
+	/* Configure IET sample structure for new DRM interface */
+	iet_sample.iet_lut = (uint64_t)(uintptr_t)ietlutentries;
+	iet_sample.nr_elements = size;
+	iet_sample.iet_mode = DRM_MODE_IET_MULTIPLICATIVE;
+
+	igt_debug("IET sample config: lut_ptr=0x%llx, nr_elements=%u, mode=%d\n",
+		  (unsigned long long)iet_sample.iet_lut, iet_sample.nr_elements, iet_sample.iet_mode);
+
+	igt_crtc_replace_prop_blob(crtc, IGT_CRTC_IET_LUT,
+				   &iet_sample, sizeof(iet_sample));
+}
+
+static struct globalhist_args *algo_get_pixel_factor(drmModePropertyBlobRes *global_hist_blob,
+						    igt_output_t *output, enum pipe pipe)
+{
+	int i;
+	struct globalhist_args *argsPtr =
+		(struct globalhist_args *)malloc(sizeof(struct globalhist_args));
+	struct drm_histogram *histogram_data;
+	drmModeModeInfo *mode;
+
+	if(!argsPtr)
+		return NULL;
+
+	/* Initialize IET LUT entries array */
+	memset(argsPtr->ietlutentries, 0, sizeof(argsPtr->ietlutentries));
+
+	mode = igt_output_get_mode(output);
+	histogram_data = (struct drm_histogram *)global_hist_blob->data;
+
+	switch (pipe) {
+		case PIPE_A: argsPtr->pipeid = GlobalHist_PIPE_A; break;
+		case PIPE_B: argsPtr->pipeid = GlobalHist_PIPE_B; break;
+		case PIPE_C: argsPtr->pipeid = GlobalHist_PIPE_C; break;
+		case PIPE_D: argsPtr->pipeid = GlobalHist_PIPE_D; break;
+		default:     argsPtr->pipeid = GlobalHist_PIPE_A; break;
+	}
+
+	/* Extract actual histogram values */
+	for (i = 0; i < min((uint32_t)32, histogram_data->nr_elements); i++)
+                argsPtr->histogram[i] = histogram_data->max_rgb[i];
+
+	/* Fill remaining bins with zero if DRM has fewer bins */
+        for (i = histogram_data->nr_elements; i < 32; i++)
+                argsPtr->histogram[i] = 0;
+
+	argsPtr->binscount = histogram_data->nr_elements;
+	/* Set IET mode (0=disabled, 1=enabled) */
+	argsPtr->ietmode = 1;
+
+	argsPtr->isprogramdiet = true;
+	argsPtr->resolution_x = mode->hdisplay;
+	argsPtr->resolution_y = mode->vdisplay;
+	argsPtr->histogrammode = DRM_MODE_HISTOGRAM_HSV_MAX_RGB;
+
+	igt_debug("Algorithm input: pipeid=%d, histogrammode=%d, binscount=%d, "
+		  "resolution=%dx%d, isprogramdiet=%s, ietmode=%d\n",
+		  argsPtr->pipeid, argsPtr->histogrammode, argsPtr->binscount,
+		  argsPtr->resolution_x, argsPtr->resolution_y,
+		  argsPtr->isprogramdiet ? "true" : "false", argsPtr->ietmode);
+
+	igt_debug("Making call to global histogram algorithm.\n");
+
+	histogram_compute_generate_data_bin(argsPtr);
+
+	return argsPtr;
+}
+
+static void algo_image_enhancement_factor(data_t *data, enum pipe pipe,
+					  igt_output_t *output,
+					  drmModePropertyBlobRes *global_hist_blob)
+{
+	struct globalhist_args *args = algo_get_pixel_factor(global_hist_blob, output, pipe);
+
+	igt_assert(args);
+	igt_debug("Writing pixel factor blob.\n");
+
+	set_pixel_factor(data, pipe, args->ietlutentries, 32);
+	free(args);
+
+	igt_display_commit2(&data->display, COMMIT_ATOMIC);
+}
+#endif
+
 static void create_monochrome_fbs(data_t *data, drmModeModeInfo *mode)
 {
 	/* TODO: Extend the tests for different formats/modifiers. */
@@ -319,6 +431,9 @@ static void run_global_histogram_pipeline(data_t *data, enum pipe pipe, igt_outp
 
 	read_global_histogram(data, pipe, &global_hist_blob);
 
+	if (test_pixel_factor)
+		test_pixel_factor(data, pipe, output, global_hist_blob);
+
 	drmModeFreePropertyBlob(global_hist_blob);
 
 	cleanup_pipe(data, pipe, output);
@@ -347,6 +462,15 @@ static void run_tests_for_global_histogram(data_t *data, bool color_fb,
 	}
 }
 
+static void run_algo_test(data_t *data, bool color_fb)
+{
+#ifdef HAVE_LIBGHE
+	run_tests_for_global_histogram(data, color_fb, algo_image_enhancement_factor);
+#else
+	igt_skip("Histogram algorithm library not found.\n");
+#endif
+}
+
 int igt_main()
 {
 	data_t data = {};
@@ -368,6 +492,18 @@ int igt_main()
 		     "and then read the histogram data.");
 	igt_subtest_with_dynamic("global-color")
 		run_tests_for_global_histogram(&data, true, NULL);
+
+	igt_describe("Test to enable histogram, flip monochrome fbs, wait for histogram "
+		     "event and then read the histogram data and enhance pixels by multiplying "
+		     "by a pixel factor using algo.");
+	igt_subtest_with_dynamic("algo-basic")
+		run_algo_test(&data, false);
+
+	igt_describe("Test to enable histogram, flip color fbs, wait for histogram event "
+		     "and then read the histogram data and enhance pixels by multiplying "
+		     "by a pixel factor using algo.");
+	igt_subtest_with_dynamic("algo-color")
+		run_algo_test(&data, true);
 
 	igt_fixture() {
 		igt_display_fini(&data.display);
