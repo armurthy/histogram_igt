@@ -26,6 +26,13 @@
 #include <ghe/ghe.h>
 #endif
 
+#ifdef HAVE_LIBDPST
+#include <dpst/DisplayPcDpst.h>
+
+#define BACKLIGHT_PATH "/sys/class/backlight"
+#define DPST_MAX_AGGRESSIVENESS    3
+#endif
+
 #define GLOBAL_HIST_DISABLE		0
 #define GLOBAL_HIST_ENABLE		1
 #define GLOBAL_HIST_DELAY		2
@@ -51,6 +58,16 @@
  * Description: Test to enable histogram, flip color fbs, wait for histogram event
  *		and then read the histogram data and enhance pixels by multiplying
  *		by a pixel factor using algo
+ *
+ * SUBTEST: dpst-basic
+ * Description: Test to enable histogram, flip monochrome fbs, wait for histogram
+ *              event and then read the histogram data and enhance pixels by multiplying
+ *              by a pixel factor using DPST algorithm with brightness adjustment
+ *
+ * SUBTEST: dpst-color
+ * Description: Test to enable histogram, flip color fbs, wait for histogram event
+ *              and then read the histogram data and enhance pixels by multiplying
+ *              by a pixel factor using DPST algorithm with brightness adjustment
  */
 
 IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
@@ -309,6 +326,74 @@ static void algo_image_enhancement_factor(data_t *data, enum pipe pipe,
 }
 #endif
 
+#ifdef HAVE_LIBDPST
+static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
+					 igt_output_t *output,
+					 drmModePropertyBlobRes *global_hist_blob)
+{
+	int i;
+	int actual_brightness;
+	drmModeModeInfo *mode;
+	DD_DPST_ARGS args = {0};
+	uint32_t expected_brightness_lut;
+	struct drm_histogram *histogram_data;
+	igt_backlight_context_t context = {
+		.backlight_dir_path = BACKLIGHT_PATH,
+		.path = "intel_backlight",
+	};
+
+	mode = igt_output_get_mode(output);
+	histogram_data = (struct drm_histogram *)global_hist_blob->data;
+
+	/* Extract actual histogram values */
+	for (i = 0; i < DPST_BIN_COUNT; i++)
+		args.Histogram[i] = histogram_data->max_rgb[i];
+
+	/* Fill remaining bins with zero if DRM has fewer bins */
+	for (i = histogram_data->nr_elements; i < DPST_BIN_COUNT; i++)
+		args.Histogram[i] = 0;
+
+	/* Set DPST parameters */
+	args.Aggressiveness_Level = DPST_MAX_AGGRESSIVENESS;
+	args.Resolution_X = mode->hdisplay;
+	args.Resolution_Y = mode->vdisplay;
+
+	igt_debug("DPST Algorithm input: PipeId=%d, Aggressiveness=%d, resolution=%dx%d\n",
+		  (int)args.PipeId, (int)args.Aggressiveness_Level,
+		  (int)args.Resolution_X, (int)args.Resolution_Y);
+
+	igt_debug("Making call to DPST algorithm.\n");
+
+	set_histogram_data_bin(&args);
+
+	igt_debug("Writing DPST ipixel factor blob and adjusting brightness.\n");
+	set_pixel_factor(data, pipe, args.DietFactor, DPST_IET_LUT_LENGTH + 1);
+
+	igt_display_commit2(&data->display, COMMIT_ATOMIC);
+
+	/* Wait for vblank cycles after commit to read actual_brightness */
+	igt_wait_for_vblank_count(igt_crtc_for_pipe(&data->display, pipe), 3);
+
+	/* Last entry of DietFactor is the brightness value from algorithm */
+	expected_brightness_lut = args.DietFactor[DPST_IET_LUT_LENGTH];
+	igt_debug("Expected brightness from IET LUT last entry: %u\n",
+			expected_brightness_lut);
+
+	/* Read actual brightness from sysfs backlight path */
+	igt_assert_eq(igt_backlight_read(&actual_brightness, "brightness", &context), 0);
+	igt_debug("Actual brightness from sysfs on pipe %s: %d\n",
+		   kmstest_pipe_name(pipe), actual_brightness);
+
+	/* Compare IET LUT last entry with sysfs backlight brightness */
+
+	igt_assert_f(actual_brightness == (int)expected_brightness_lut,
+		     "Brightness mismatch on pipe %s: "
+		     "IET LUT last entry=%u, sysfs brightness=%d\n",
+		     kmstest_pipe_name(pipe),
+		     expected_brightness_lut, actual_brightness);
+}
+#endif
+
 static void create_monochrome_fbs(data_t *data, drmModeModeInfo *mode)
 {
 	/* TODO: Extend the tests for different formats/modifiers. */
@@ -443,6 +528,15 @@ static void run_algo_test(data_t *data, bool color_fb)
 #endif
 }
 
+static void run_dpst_test(data_t *data, bool color_fb)
+{
+#ifdef HAVE_LIBDPST
+	run_tests_for_global_histogram(data, color_fb, dpst_image_enhancement_factor);
+#else
+	igt_skip("DPST algorithm library not found.\n");
+#endif
+}
+
 int igt_main()
 {
 	data_t data = {};
@@ -476,6 +570,18 @@ int igt_main()
 		     "by a pixel factor using algo.");
 	igt_subtest_with_dynamic("algo-color")
 		run_algo_test(&data, true);
+
+	igt_describe("Test to enable histogram, flip monochrome fbs, wait for histogram "
+		     "event and then read the histogram data and enhance pixels by multiplying "
+		     "by a pixel factor using DPST algorithm with brightness adjustment.");
+	igt_subtest_with_dynamic("dpst-basic")
+		run_dpst_test(&data, false);
+
+	igt_describe("Test to enable histogram, flip color fbs, wait for histogram event "
+		     "and then read the histogram data and enhance pixels by multiplying "
+		     "by a pixel factor using DPST algorithm with brightness adjustment.");
+	igt_subtest_with_dynamic("dpst-color")
+		run_dpst_test(&data, true);
 
 	igt_fixture() {
 		igt_display_fini(&data.display);
