@@ -26,6 +26,12 @@
 #include <ghe/ghe.h>
 #endif
 
+#ifdef HAVE_LIBDPST
+#include <dpst/DisplayPcDpst.h>
+
+#define DPST_MAX_AGGRESSIVENESS    5
+#endif
+
 #define GLOBAL_HIST_DISABLE		0
 #define GLOBAL_HIST_ENABLE		1
 #define GLOBAL_HIST_DELAY		2
@@ -51,6 +57,16 @@
  * Description: Test to enable histogram, flip color fbs, wait for histogram event
  *		and then read the histogram data and enhance pixels by multiplying
  *		by a pixel factor using algo
+ *
+ * SUBTEST: dpst-basic
+ * Description: Test to enable histogram, flip monochrome fbs, wait for histogram
+ *              event and then read the histogram data and enhance pixels by multiplying
+ *              by a pixel factor using DPST algorithm with brightness adjustment
+ *
+ * SUBTEST: dpst-color
+ * Description: Test to enable histogram, flip color fbs, wait for histogram event
+ *              and then read the histogram data and enhance pixels by multiplying
+ *              by a pixel factor using DPST algorithm with brightness adjustment
  */
 
 IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
@@ -336,6 +352,112 @@ static void algo_image_enhancement_factor(data_t *data, enum pipe pipe,
 }
 #endif
 
+#ifdef HAVE_LIBDPST
+static int set_pixel_factor_and_brightness(data_t *data, enum pipe pipe,
+					   DD_DPST_ARGS *argsPtr)
+{
+	uint32_t i;
+	igt_crtc_t *crtc;
+	struct drm_iet_1dlut_sample iet_sample = {0};
+	size_t diet_factor_size = DPST_IET_LUT_LENGTH + 1;
+
+	crtc = igt_crtc_for_pipe(&data->display, pipe);
+
+	/* Debug output for IET LUT entries (first 33) and brightness (34th) */
+	for (i = 0; i < DPST_IET_LUT_LENGTH; i++)
+		igt_debug("IET LUT Entry[%d] = %u\n", i, argsPtr->DietFactor[i]);
+
+	igt_debug("Brightness Entry[%d] = %u\n", DPST_IET_LUT_LENGTH,
+			argsPtr->DietFactor[DPST_IET_LUT_LENGTH]);
+
+	/* Configure IET sample structure for new DRM interface */
+	iet_sample.iet_lut = (uint64_t)(uintptr_t)argsPtr->DietFactor;
+	iet_sample.nr_elements = diet_factor_size;
+	iet_sample.iet_mode = DRM_MODE_IET_MULTIPLICATIVE;
+
+	igt_crtc_replace_prop_blob(crtc, IGT_CRTC_IET_LUT,
+			&iet_sample, sizeof(iet_sample));
+
+	return 0;
+}
+
+static DD_DPST_ARGS *dpst_get_pixel_factor(drmModePropertyBlobRes *global_hist_blob,
+					   igt_output_t *output, enum pipe pipe)
+{
+	int i;
+	drmModeModeInfo *mode;
+	struct drm_histogram *histogram_data;
+	DD_DPST_ARGS *argsPtr = (DD_DPST_ARGS *)malloc(sizeof(DD_DPST_ARGS));
+
+	if (!argsPtr)
+		return NULL;
+
+	/* Initialize DietFactor array */
+	memset(argsPtr->DietFactor, 0, sizeof(argsPtr->DietFactor));
+
+	mode = igt_output_get_mode(output);
+	histogram_data = (struct drm_histogram *)global_hist_blob->data;
+
+	/* Map pipe enum to DPST PIPE_ID */
+	switch (pipe) {
+		case PIPE_A: argsPtr->PipeId = DPST_PIPE_A; break;
+		case PIPE_B: argsPtr->PipeId = DPST_PIPE_B; break;
+		case PIPE_C: argsPtr->PipeId = DPST_PIPE_C; break;
+		case PIPE_D: argsPtr->PipeId = DPST_PIPE_D; break;
+		default:     argsPtr->PipeId = DPST_PIPE_A; break;
+	}
+
+	/* Extract actual histogram values */
+	for (i = 0; i < min((uint32_t)DPST_BIN_COUNT, histogram_data->nr_elements); i++)
+		argsPtr->Histogram[i] = histogram_data->max_rgb[i];
+
+	/* Fill remaining bins with zero if DRM has fewer bins */
+	for (i = histogram_data->nr_elements; i < DPST_BIN_COUNT; i++)
+		argsPtr->Histogram[i] = 0;
+
+	/* Set DPST parameters */
+	argsPtr->DpstOpReq = DD_DPST_PROGRAM_DIET_REGS;
+	argsPtr->IsSwDpst = true;
+	argsPtr->IsProgramDiet = true;
+	argsPtr->Aggressiveness_Level = DPST_MAX_AGGRESSIVENESS;
+	argsPtr->Resolution_X = mode->hdisplay;
+	argsPtr->Resolution_Y = mode->vdisplay;
+
+	igt_debug("DPST Algorithm input: PipeId=%d, DpstOpReq=%d (%s), Aggressiveness=%d, "
+		  "resolution=%dx%d, IsProgramDiet=%s, IsSwDpst=%s\n",
+		  argsPtr->PipeId, argsPtr->DpstOpReq,
+		  (argsPtr->DpstOpReq == DD_DPST_PROGRAM_DIET_REGS) ? "PROGRAM_DIET_REGS" : "OTHER",
+		  argsPtr->Aggressiveness_Level,
+		  argsPtr->Resolution_X, argsPtr->Resolution_Y,
+		  argsPtr->IsProgramDiet ? "true" : "false",
+		  argsPtr->IsSwDpst ? "true" : "false");
+
+	igt_debug("Making call to DPST algorithm.\n");
+
+	set_histogram_data_bin(argsPtr);
+
+	return argsPtr;
+}
+
+static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
+					  igt_output_t *output,
+					  drmModePropertyBlobRes *global_hist_blob)
+{
+	DD_DPST_ARGS *args = dpst_get_pixel_factor(global_hist_blob, output, pipe);
+	int ret;
+
+	igt_assert(args);
+	igt_debug("Writing DPST pixel factor blob and adjusting brightness.\n");
+
+	ret = set_pixel_factor_and_brightness(data, pipe, args);
+	igt_assert_eq(ret, 0);
+
+	free(args);
+
+	igt_display_commit2(&data->display, COMMIT_ATOMIC);
+}
+#endif
+
 static void create_monochrome_fbs(data_t *data, drmModeModeInfo *mode)
 {
 	/* TODO: Extend the tests for different formats/modifiers. */
@@ -471,6 +593,15 @@ static void run_algo_test(data_t *data, bool color_fb)
 #endif
 }
 
+static void run_dpst_test(data_t *data, bool color_fb)
+{
+#ifdef HAVE_LIBDPST
+	run_tests_for_global_histogram(data, color_fb, dpst_image_enhancement_factor);
+#else
+	igt_skip("DPST algorithm library not found.\n");
+#endif
+}
+
 int igt_main()
 {
 	data_t data = {};
@@ -504,6 +635,18 @@ int igt_main()
 		     "by a pixel factor using algo.");
 	igt_subtest_with_dynamic("algo-color")
 		run_algo_test(&data, true);
+
+	igt_describe("Test to enable histogram, flip monochrome fbs, wait for histogram "
+		     "event and then read the histogram data and enhance pixels by multiplying "
+		     "by a pixel factor using DPST algorithm with brightness adjustment.");
+	igt_subtest_with_dynamic("dpst-basic")
+		run_dpst_test(&data, false);
+
+	igt_describe("Test to enable histogram, flip color fbs, wait for histogram event "
+		     "and then read the histogram data and enhance pixels by multiplying "
+		     "by a pixel factor using DPST algorithm with brightness adjustment.");
+	igt_subtest_with_dynamic("dpst-color")
+		run_dpst_test(&data, true);
 
 	igt_fixture() {
 		igt_display_fini(&data.display);
