@@ -21,6 +21,7 @@
 
 #include "igt.h"
 #include "igt_vec.h"
+#include "igt_psr.h"
 
 #ifdef HAVE_LIBGHE
 #include <ghe/ghe.h>
@@ -67,6 +68,11 @@
  * Description: Test to enable histogram, flip color fbs, wait for histogram event
  *              and then read the histogram data and enhance pixels by multiplying
  *              by a pixel factor using DPST algorithm with brightness adjustment
+ *
+ * SUBTEST: dpst-color-selective-fetch
+ * Description: Test to enable global histogram, update SF clip, read histogram blob
+ *              and enhances the pixels by multiplying by a pixel factor using dpst algo
+ *              with brightness adjustment
  */
 
 IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
@@ -74,8 +80,10 @@ IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
 typedef struct data {
 	igt_display_t display;
 	int drm_fd;
+	int debugfs_fd;
 	int bin_count;
 	igt_fb_t fb[5];
+	bool selective_fetch;
 } data_t;
 
 typedef void (*test_t)(data_t*, enum pipe, igt_output_t*, drmModePropertyBlobRes*);
@@ -124,6 +132,15 @@ static void configure_and_verify_histogram(data_t *data, enum pipe pipe,
 	config->nr_hist_mode_data = 0;
 	config->hist_mode = DRM_MODE_HISTOGRAM_HSV_MAX_RGB;
 	config->enable = expected_value;
+
+	/* If SelectiveFetch test is enabled set the damage area */
+	if (data->selective_fetch) {
+		config->sf = true;
+		config->clip.x1 = SQUARE_OFFSET;
+		config->clip.y1 = SQUARE_OFFSET;
+		config->clip.x2 = SQUARE_OFFSET + SQUARE_SIZE;
+		config->clip.y2 = SQUARE_OFFSET + SQUARE_SIZE;
+	}
 
 	igt_crtc_replace_prop_blob(crtc, IGT_CRTC_HISTOGRAM_ENABLE, config, sizeof(*config));
 	igt_display_commit2(&data->display, COMMIT_ATOMIC);
@@ -608,6 +625,7 @@ int igt_main()
 
 	igt_fixture() {
 		data.drm_fd = drm_open_driver_master(DRIVER_ANY);
+		data.debugfs_fd = igt_debugfs_dir(data.drm_fd);
 		kmstest_set_vt_graphics_mode();
 		igt_display_require(&data.display, data.drm_fd);
 		igt_display_require_output(&data.display);
@@ -647,6 +665,21 @@ int igt_main()
 		     "by a pixel factor using DPST algorithm with brightness adjustment.");
 	igt_subtest_with_dynamic("dpst-color")
 		run_dpst_test(&data, true);
+
+	igt_describe("Test to enable global histogram, update SF clip, read histogram blob "
+		     "and enhances the pixels by multiplying by a pixel factor using dpst algo "
+		     "with brightness adjustment.");
+	igt_subtest_with_dynamic("dpst-color-selective-fetch") {
+		igt_require_f(psr_sink_support(data.drm_fd, data.debugfs_fd, PSR_MODE_2, NULL),
+			      "Sink does not support PSR2\n");
+		/* Test if PSR2 can be enabled */
+		igt_require_f(psr_enable(data.drm_fd, data.debugfs_fd, PSR_MODE_2, NULL),
+			      "Error enabling PSR2\n");
+		data.selective_fetch = true;
+		run_dpst_test(&data, true);
+		igt_require_f(psr_disable(data.drm_fd, data.debugfs_fd, NULL),
+			      "Error disabling PSR2\n");
+	}
 
 	igt_fixture() {
 		igt_display_fini(&data.display);
