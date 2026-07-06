@@ -168,6 +168,11 @@ enum igt_atomic_crtc_properties {
        IGT_CRTC_VRR_ENABLED,
        IGT_CRTC_SCALING_FILTER,
        IGT_CRTC_SHARPNESS_STRENGTH,
+       IGT_CRTC_HISTOGRAM_CAPS,
+       IGT_CRTC_HISTOGRAM_ENABLE,
+       IGT_CRTC_HISTOGRAM_DATA,
+       IGT_CRTC_IET_LUT_CAPS,
+       IGT_CRTC_IET_LUT,
        IGT_NUM_CRTC_PROPS
 };
 
@@ -1240,6 +1245,8 @@ bool igt_format_mods_has_modifier(const struct igt_format_mods *format_mods,
 
 bool igt_display_has_format_mod(igt_display_t *display, uint32_t format, uint64_t modifier);
 bool igt_plane_has_format_mod(igt_plane_t *plane, uint32_t format, uint64_t modifier);
+
+bool igt_global_histogram_event_detected(struct udev_monitor *mon, int timeout_secs);
 
 /**
  * igt_vblank_after_eq:
