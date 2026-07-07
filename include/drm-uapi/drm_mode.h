@@ -28,7 +28,6 @@
 #define _DRM_MODE_H
 
 #include "drm.h"
-#include <stdbool.h>
 
 #if defined(__cplusplus)
 extern "C" {
@@ -1587,12 +1586,16 @@ struct drm_histogram_caps {
  *		       hist_mode_data
  * @hist_mode: histogram mode(HSV max(RGB), RGB, LUMA etc)
  * @enable: flag to enable/disable histogram
+ * @sf: flag to enable/disable selective fetch
+ * @clip: two dimensional rectangle co-ordinates for selective fetch
  */
 struct drm_histogram_config {
 	__u64 hist_mode_data;
 	__u32 nr_hist_mode_data;
 	enum drm_mode_histogram hist_mode;
 	bool enable;
+	bool sf;
+	struct drm_mode_rect clip;
 };
 
 /**
