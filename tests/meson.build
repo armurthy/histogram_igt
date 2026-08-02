@@ -421,7 +421,7 @@ extra_dependencies = {
 	'gem_eio': [ realtime ],
 	'gem_exec_balancer': [ lib_igt_perf ],
 	'gem_mmap_offset': [ libatomic ],
-        'kms_histogram': [ libghe ],
+        'kms_histogram': [ libghe, libdpst ],
 	'i915_drm_fdinfo': [ lib_igt_drm_fdinfo ],
 	'i915_pm_freq_mult': [ lib_igt_perf ],
 	'i915_pm_rc6_residency': [ lib_igt_perf ],
