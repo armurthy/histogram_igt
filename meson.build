@@ -199,6 +199,18 @@ else
 	chamelium = disabler()
 endif
 
+libghe = dependency('libghe', required : false)
+if libghe.found()
+      config.set('HAVE_LIBGHE', 1)
+endif
+
+libdpst = dependency('libdpst', required : false)
+if libdpst.found()
+	config.set('HAVE_LIBDPST', 1)
+else
+	warning('LIBDPST not found')
+endif
+
 build_info += 'Build Chamelium test: @0@'.format(chamelium.found())
 
 pthreads = dependency('threads')
