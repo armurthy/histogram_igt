@@ -21,6 +21,7 @@
 
 #include "igt.h"
 #include "igt_vec.h"
+#include "igt_psr.h"
 
 #ifdef HAVE_LIBGHE
 #include <ghe/ghe.h>
@@ -65,16 +66,35 @@
  * Description: Test to enable histogram, flip color fbs, wait for histogram event
  *              and then read the histogram data and enhance pixels by multiplying
  *              by a pixel factor using DPST algorithm with brightness adjustment
+ *
+ * SUBTEST: %s-ghe-color
+ * Description: This test enable histogram and %arg[1], flip color fbs, wait for
+ *              %arg[1] to be active, on getting histogram event call
+ *              GHE algorithm for IET LUT computation.
+ *
+ * SUBTEST: %s-dpst-color
+ * Description: This test enable histogram and %arg[1], flip color fbs, wait for
+ *              %arg[1] to be active, on getting histogram event call DPST
+ *              algorithm for IET LUT computation and brightness adjustment.
+ * arg[1]:
+ *
+ * @psr:		PSR1
+ * @psr2:		PSR2
  */
 
 IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
 
 typedef struct data {
 	int drm_fd;
+	int debugfs_fd;
 	igt_fb_t fb[5];
 	igt_display_t display;
+	enum psr_mode op_psr_mode;
 	struct drm_histogram_caps caps_data;
 } data_t;
+
+static const char * const append_subtest_name[] = { "psr-", "psr2-" };
+static const int          modes[]               = { PSR_MODE_1, PSR_MODE_2 };
 
 typedef void (*test_t)(data_t*, enum pipe, igt_output_t*, drmModePropertyBlobRes*);
 
@@ -498,13 +518,15 @@ static void flip_fb(data_t *data, enum pipe pipe, igt_output_t *output, struct i
 	igt_display_commit2(&data->display, COMMIT_ATOMIC);
 }
 
-static void prepare_pipe(data_t *data, enum pipe pipe, igt_output_t *output, bool color_fb)
+static void prepare_pipe(data_t *data, enum pipe pipe, igt_output_t *output,
+			 bool color_fb, bool is_psr)
 {
 	int i;
 	struct udev_monitor *mon = igt_watch_uevents();
 	drmModeModeInfo *mode = igt_output_get_mode(output);
 	bool event_detected = false;
 	int fb_count = color_fb ? 5 : 2;
+	const char *psr_label = data->op_psr_mode == PSR_MODE_1 ? "PSR1" : "PSR2";
 
 	if (color_fb)
 		create_color_fbs(data, mode);
@@ -514,9 +536,36 @@ static void prepare_pipe(data_t *data, enum pipe pipe, igt_output_t *output, boo
 	flip_fb(data, pipe, output, &data->fb[0]);
 	enable_and_verify_global_histogram(data, pipe);
 
+	if (is_psr) {
+		psr_enable(data->drm_fd, data->debugfs_fd, data->op_psr_mode, output);
+
+		if (!psr_wait_entry(data->debugfs_fd, data->op_psr_mode, output)) {
+			igt_cleanup_uevents(mon);
+			psr_disable(data->drm_fd, data->debugfs_fd, output);
+			cleanup_pipe(data, pipe, output);
+
+			igt_skip("%s did not enter on pipe %s / output %s "
+				 "after enable.\n",
+				 psr_label,
+				 kmstest_pipe_name(pipe),
+				 igt_output_name(output));
+		}
+
+		igt_info("%s entered on pipe %s / output %s, "
+			 "starting flip loop.\n",
+			 psr_label,
+			 kmstest_pipe_name(pipe), igt_output_name(output));
+	}
+
 	igt_flush_uevents(mon);
 	for (i = 1; i <= FLIP_COUNT; i++) {
 		flip_fb(data, pipe, output, &data->fb[i % fb_count]);
+
+		if (is_psr &&  !psr_wait_entry(data->debugfs_fd, data->op_psr_mode, output)) {
+			igt_debug("Flip %d: %s exited after flip, waiting for re-entry...\n",
+				  i, psr_label);
+			continue;
+		}
 
 		/* TODO: for handling multiple interrupts/events */
 		/* Flip and break as soon as a histogram event is detected. */
@@ -528,23 +577,31 @@ static void prepare_pipe(data_t *data, enum pipe pipe, igt_output_t *output, boo
 
 	igt_cleanup_uevents(mon);
 
-	if (!event_detected)
+	if (!event_detected) {
+		if (is_psr)
+			psr_disable(data->drm_fd, data->debugfs_fd, output);
+
 		cleanup_pipe(data, pipe, output);
+	}
 
 	igt_assert_f(event_detected, "Histogram event not generated.\n");
 }
 
-static void run_global_histogram_pipeline(data_t *data, enum pipe pipe, igt_output_t *output,
-					  bool color_fb, test_t test_pixel_factor)
+static void run_global_histogram_pipeline(data_t *data, enum pipe pipe,
+					  igt_output_t *output, bool color_fb,
+					  test_t test_pixel_factor, bool is_psr)
 {
 	drmModePropertyBlobRes *global_hist_blob = NULL;
-	prepare_pipe(data, pipe, output, color_fb);
+	prepare_pipe(data, pipe, output, color_fb, is_psr);
 
 	if (!is_global_histogram_enabled(data, pipe)) {
 		igt_debug("Skipping read: global histogram is disabled on pipe %s\n",
 			   kmstest_pipe_name(pipe));
+		if (is_psr)
+			psr_disable(data->drm_fd, data->debugfs_fd, output);
+
 		cleanup_pipe(data, pipe, output);
-		igt_skip("Global histogram disabled; skipping histogram data read.\n");
+			igt_skip("Global histogram disabled; skipping histogram data read.\n");
 	}
 
 	read_global_histogram(data, pipe, &global_hist_blob);
@@ -558,7 +615,8 @@ static void run_global_histogram_pipeline(data_t *data, enum pipe pipe, igt_outp
 }
 
 static void run_tests_for_global_histogram(data_t *data, bool color_fb,
-					   test_t test_pixel_factor)
+					   test_t test_pixel_factor,
+					   bool is_psr)
 {
 	enum pipe pipe;
 	igt_crtc_t *crtc;
@@ -569,6 +627,10 @@ static void run_tests_for_global_histogram(data_t *data, bool color_fb,
 		for_each_valid_output_on_crtc(&data->display, crtc, output) {
 
 			if (!igt_crtc_has_prop(crtc, IGT_CRTC_HISTOGRAM_CAPS))
+				continue;
+
+			if (is_psr && !psr_sink_support(data->drm_fd, data->debugfs_fd,
+							data->op_psr_mode, output))
 				continue;
 
 			igt_display_reset(&data->display);
@@ -582,24 +644,27 @@ static void run_tests_for_global_histogram(data_t *data, bool color_fb,
 				      igt_output_name(output))
 				      run_global_histogram_pipeline(data, pipe, output,
 								    color_fb,
-								    test_pixel_factor);
+								    test_pixel_factor,
+								    is_psr);
 		}
 	}
 }
 
-static void run_algo_test(data_t *data, bool color_fb)
+static void run_algo_test(data_t *data, bool color_fb, bool is_psr)
 {
 #ifdef HAVE_LIBGHE
-	run_tests_for_global_histogram(data, color_fb, algo_image_enhancement_factor);
+	run_tests_for_global_histogram(data, color_fb,
+				       algo_image_enhancement_factor, is_psr);
 #else
 	igt_skip("Histogram algorithm library not found.\n");
 #endif
 }
 
-static void run_dpst_test(data_t *data, bool color_fb)
+static void run_dpst_test(data_t *data, bool color_fb, bool is_psr)
 {
 #ifdef HAVE_LIBDPST
-	run_tests_for_global_histogram(data, color_fb, dpst_image_enhancement_factor);
+	run_tests_for_global_histogram(data, color_fb,
+				       dpst_image_enhancement_factor, is_psr);
 #else
 	igt_skip("DPST algorithm library not found.\n");
 #endif
@@ -611,6 +676,7 @@ int igt_main()
 
 	igt_fixture() {
 		data.drm_fd = drm_open_driver_master(DRIVER_ANY);
+		data.debugfs_fd = igt_debugfs_dir(data.drm_fd);
 		kmstest_set_vt_graphics_mode();
 		igt_display_require(&data.display, data.drm_fd);
 		igt_display_require_output(&data.display);
@@ -620,38 +686,57 @@ int igt_main()
 	igt_describe("Test to enable histogram, flip monochrome fbs, wait for histogram "
 		     "event and then read the histogram data.");
 	igt_subtest_with_dynamic("global-basic")
-		run_tests_for_global_histogram(&data, false, NULL);
+		run_tests_for_global_histogram(&data, false, NULL, false);
 
 	igt_describe("Test to enable histogram, flip color fbs, wait for histogram event "
 		     "and then read the histogram data.");
 	igt_subtest_with_dynamic("global-color")
-		run_tests_for_global_histogram(&data, true, NULL);
+		run_tests_for_global_histogram(&data, true, NULL, false);
 
 	igt_describe("Test to enable histogram, flip monochrome fbs, wait for histogram "
 		     "event and then read the histogram data and enhance pixels by multiplying "
 		     "by a pixel factor using algo.");
 	igt_subtest_with_dynamic("algo-basic")
-		run_algo_test(&data, false);
+		run_algo_test(&data, false, false);
 
 	igt_describe("Test to enable histogram, flip color fbs, wait for histogram event "
 		     "and then read the histogram data and enhance pixels by multiplying "
 		     "by a pixel factor using algo.");
 	igt_subtest_with_dynamic("algo-color")
-		run_algo_test(&data, true);
+		run_algo_test(&data, true, false);
 
 	igt_describe("Test to enable histogram, flip monochrome fbs, wait for histogram "
 		     "event and then read the histogram data and enhance pixels by multiplying "
 		     "by a pixel factor using DPST algorithm with brightness adjustment.");
 	igt_subtest_with_dynamic("dpst-basic")
-		run_dpst_test(&data, false);
+		run_dpst_test(&data, false, false);
 
 	igt_describe("Test to enable histogram, flip color fbs, wait for histogram event "
 		     "and then read the histogram data and enhance pixels by multiplying "
 		     "by a pixel factor using DPST algorithm with brightness adjustment.");
 	igt_subtest_with_dynamic("dpst-color")
-		run_dpst_test(&data, true);
+		run_dpst_test(&data, true, false);
+
+	for (int i = 0; i < ARRAY_SIZE(modes); i++) {
+		data.op_psr_mode = modes[i];
+		igt_describe("This test enable histogram and PSR, flip color fbs, wait for "
+			     "PSR to be active, on getting histogram event call "
+			     "GHE algorithm for IET LUT computation.");
+		igt_subtest_with_dynamic_f("%sghe-color", append_subtest_name[i])
+			 run_algo_test(&data, true, true);
+	}
+
+	for (int i = 0; i < ARRAY_SIZE(modes); i++) {
+		data.op_psr_mode = modes[i];
+		igt_describe("This test enable histogram and PSR, flip color fbs, wait for "
+			     "PSR to be active, on getting histogram event call DPST "
+			     "algorithm for IET LUT computation and brightness adjustment.");
+		igt_subtest_with_dynamic_f("%sdpst-color", append_subtest_name[i])
+			 run_algo_test(&data, true, true);
+	}
 
 	igt_fixture() {
+		close(data.debugfs_fd);
 		igt_display_fini(&data.display);
 		drm_close_driver(data.drm_fd);
 	}
