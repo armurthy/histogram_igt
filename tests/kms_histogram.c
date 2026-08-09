@@ -72,6 +72,10 @@
  *              %arg[1] to be active, on getting histogram event call
  *              GHE algorithm for IET LUT computation.
  *
+ * SUBTEST: %s-dpst-color
+ * Description: This test enable histogram and %arg[1], flip color fbs, wait for
+ *              %arg[1] to be active, on getting histogram event call DPST
+ *              algorithm for IET LUT computation and brightness adjustment.
  * arg[1]:
  *
  * @psr:		PSR1
@@ -656,10 +660,11 @@ static void run_algo_test(data_t *data, bool color_fb, bool is_psr)
 #endif
 }
 
-static void run_dpst_test(data_t *data, bool color_fb)
+static void run_dpst_test(data_t *data, bool color_fb, bool is_psr)
 {
 #ifdef HAVE_LIBDPST
-	run_tests_for_global_histogram(data, color_fb, dpst_image_enhancement_factor);
+	run_tests_for_global_histogram(data, color_fb,
+				       dpst_image_enhancement_factor, is_psr);
 #else
 	igt_skip("DPST algorithm library not found.\n");
 #endif
@@ -704,13 +709,13 @@ int igt_main()
 		     "event and then read the histogram data and enhance pixels by multiplying "
 		     "by a pixel factor using DPST algorithm with brightness adjustment.");
 	igt_subtest_with_dynamic("dpst-basic")
-		run_dpst_test(&data, false);
+		run_dpst_test(&data, false, false);
 
 	igt_describe("Test to enable histogram, flip color fbs, wait for histogram event "
 		     "and then read the histogram data and enhance pixels by multiplying "
 		     "by a pixel factor using DPST algorithm with brightness adjustment.");
 	igt_subtest_with_dynamic("dpst-color")
-		run_dpst_test(&data, true);
+		run_dpst_test(&data, true, false);
 
 	for (int i = 0; i < ARRAY_SIZE(modes); i++) {
 		data.op_psr_mode = modes[i];
@@ -718,6 +723,15 @@ int igt_main()
 			     "PSR to be active, on getting histogram event call "
 			     "GHE algorithm for IET LUT computation.");
 		igt_subtest_with_dynamic_f("%sghe-color", append_subtest_name[i])
+			 run_algo_test(&data, true, true);
+	}
+
+	for (int i = 0; i < ARRAY_SIZE(modes); i++) {
+		data.op_psr_mode = modes[i];
+		igt_describe("This test enable histogram and PSR, flip color fbs, wait for "
+			     "PSR to be active, on getting histogram event call DPST "
+			     "algorithm for IET LUT computation and brightness adjustment.");
+		igt_subtest_with_dynamic_f("%sdpst-color", append_subtest_name[i])
 			 run_algo_test(&data, true, true);
 	}
 
