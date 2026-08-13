@@ -29,8 +29,10 @@
 #ifdef HAVE_LIBDPST
 #include <dpst/DisplayPcDpst.h>
 
-#define BACKLIGHT_PATH "/sys/class/backlight"
-#define DPST_MAX_AGGRESSIVENESS   3
+#define BACKLIGHT_PATH			"/sys/class/backlight"
+#define DPST_MAX_AGGRESSIVENESS		3
+#define DPST_FACTOR_TOLERANCE		150ULL
+#define DPST_MAX_PHASE_IN_VBLANKS	4
 #endif
 
 #define GLOBAL_HIST_DISABLE		0
@@ -345,11 +347,12 @@ static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
 					  drmModePropertyBlobRes *global_hist_blob)
 {
 	int i;
-	uint64_t prop_id;
 	int max_brightness;
-	int initial_brightness;
 	int actual_brightness;
-	int expected_brightness;
+	int initial_brightness;
+	uint64_t prop_id, diff;
+	uint64_t expected_factor;
+	uint64_t actual_factor;
 	drmModeModeInfo *mode;
 	DD_DPST_ARGS args = {0};
 	struct drm_iet_caps *iet_caps;
@@ -396,8 +399,11 @@ static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
 		  iet_caps->iet_mode,
 		  iet_caps->nr_iet_lut_entries);
 
-	/* Read max_brightness for tolerance */
-	igt_backlight_read(&max_brightness, "max_brightness", &context);
+	/* Read Brightness Before DPST */
+	igt_assert_eq(igt_backlight_read(&max_brightness, "max_brightness", &context), 0);
+	igt_assert_f(max_brightness > 0,"Invalid max_brightness = %d\n", max_brightness);
+	igt_debug("max_brightness = %d\n", max_brightness);
+
 
 	/* Read actual_brightness BEFORE applying DPST */
 	igt_assert_eq(igt_backlight_read(&initial_brightness, "actual_brightness",
@@ -407,9 +413,28 @@ static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
 	igt_debug("Making call to DPST algorithm.\n");
 	set_histogram_data_bin(&args);
 
-	/* Convert percent from DPST library to expected brightness */
-	expected_brightness = ((uint64_t)args.DietFactor[DPST_IET_LUT_LENGTH] *
-				initial_brightness) / 10000;
+	/*
+	 * "Backlight dimming factor is reciprocal of slope
+	 *  of the transfer function in the shadow region."
+	 *
+	 * "shadow_slope      = ShadowSegmentHeight /
+	 *                      ShadowSegmentLength"
+	 * "adjustment_factor = shadow_slope ^ panel_gamma
+	 *                      (2.2 for sRGB)"
+	 * "backlight_factor  = 1.0 / adjustment_factor"
+	 *
+	 * "Example:
+	 *   shadow_slope     = 1.41
+	 *   adjustment       = 1.41 ^ 2.2 = 2.129
+	 *   backlight factor = 1/2.129 = 0.47 = 47%"
+	 *
+	 * DietFactor[DPST_IET_LUT_LENGTH] (index 33):
+	 * Library encodes backlight_factor as basis points
+	 * (0-10000). Scale is FIXED regardless of platform
+	 * max_brightness value.
+	 *   10000 = 100% (no dimming)
+	 */
+	expected_factor = (uint64_t)args.DietFactor[DPST_IET_LUT_LENGTH];
 
 	igt_debug("Writing DPST pixel factor blob and adjusting brightness.\n");
 	set_pixel_factor(data, pipe, args.DietFactor,
@@ -420,37 +445,109 @@ static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
 
 	igt_display_commit2(&data->display, COMMIT_ATOMIC);
 
-	/* Wait for vblank cycles after commit to read actual_brightness */
-	igt_wait_for_vblank_count(igt_crtc_for_pipe(&data->display, pipe), 3);
+	/*
+	 * [Temporal Smoothening]
+	 * "Purpose: Apply backlight factor and IET in small
+	 *  steps to avoid a sudden visual change."
+	 *
+	 * "A 3rd order Butterworth IIR filter is used to
+	 *  calculate intermediate backlight level and IET
+	 *  to be applied."
+	 *
+	 * "Phase in is terminated once IET factor reaches
+	 *  close to the target IET under tolerance limit."
+	 *
+	 * Wait 1 vblank per iteration - synced to actual
+	 * display refresh rate (60Hz, 120Hz, 144Hz etc).
+	 */
+	actual_brightness = 0;
+	actual_factor     = 0;
+	diff              = 0;
 
-	/* Read max_brightness after DPST applied */
-	igt_assert_eq(igt_backlight_read(&actual_brightness, "actual_brightness",
-		      &context), 0);
-	igt_debug("actual_brightness = %d\n", actual_brightness);
+	for (i = 0; i < DPST_MAX_PHASE_IN_VBLANKS; i++) {
 
-	igt_assert_f(abs(expected_brightness - actual_brightness) <=
-		     max_brightness / 100,
-		     "Brightness mismatch :\n"
-		     "  percent from library = %u\n"
-		     "  expected_brightness  = %d\n"
-		     "  actual_brightness    = %d\n"
-		     "  diff                 = %d\n"
-		     "  tolerance (1%%)      = %d\n",
-		     args.DietFactor[DPST_IET_LUT_LENGTH],
-		     expected_brightness,
+		igt_wait_for_vblank_count(
+				igt_crtc_for_pipe(&data->display, pipe), 1);
+
+		igt_assert_eq(igt_backlight_read(&actual_brightness,
+					"actual_brightness", &context), 0);
+
+		actual_factor = ((uint64_t)actual_brightness * 10000ULL) /
+				 (uint64_t)max_brightness;
+
+		diff = (actual_factor > expected_factor) ?
+			(actual_factor - expected_factor) :
+			(expected_factor - actual_factor);
+
+		igt_debug("vblank[%02d/%02d]: "
+			  "actual_brightness = %d"
+			  " actual_factor = %llu (%.2f%%)"
+			  " expected_factor = %llu (%.2f%%)"
+			  " diff = %llu\n",
+			  i + 1,
+			  DPST_MAX_PHASE_IN_VBLANKS,
+			  actual_brightness,
+			  (unsigned long long)actual_factor, actual_factor / 100.0,
+			  (unsigned long long)expected_factor, expected_factor / 100.0,
+			  (unsigned long long)diff);
+
+		/*
+		 * "Phase in is terminated once IET factor
+		 *  reaches close to target IET under
+		 *  tolerance limit defined."
+		 */
+		if (diff <= DPST_FACTOR_TOLERANCE) {
+			igt_debug("Brightness settled at "
+				  "vblank %d of %d\n",
+				  i + 1,
+				  DPST_MAX_PHASE_IN_VBLANKS);
+			break;
+		}
+	}
+
+	/*  Final Validation */
+	igt_assert_f(diff <= DPST_FACTOR_TOLERANCE,
+		     "Brightness did not settle after %u vblanks:\n"
+		     "  expected_factor    = %llu (%.2f%%)\n"
+		     "  actual_factor      = %llu (%.2f%%)\n"
+		     "  diff               = %llu\n"
+		     "  tolerance (1.5%%)    = %llu\n"
+		     "  initial_brightness = %d\n"
+		     "  actual_brightness  = %d\n"
+		     "  max_brightness     = %d\n"
+		     "  pipe               = %s\n",
+		     DPST_MAX_PHASE_IN_VBLANKS,
+		     (unsigned long long)expected_factor,
+		     expected_factor / 100.0,
+		     (unsigned long long)actual_factor,
+		     actual_factor / 100.0,
+		     (unsigned long long)diff,
+		     (unsigned long long)DPST_FACTOR_TOLERANCE,
+		     initial_brightness,
 		     actual_brightness,
-		     abs(expected_brightness - actual_brightness),
-		     max_brightness / 100);
+		     max_brightness,
+		     kmstest_pipe_name(pipe));
 
-
-	igt_info("DPST test PASSED \n"
-		 "  expected = %d\n"
-		 "  actual   = %d\n"
-		 "  diff     = %d (within tolerance (1%%) %d)\n",
-		 expected_brightness,
+	igt_info("DPST test PASSED\n"
+		 "  pipe               = %s\n"
+		 "  expected_factor    = %llu (%.2f%%)\n"
+		 "  actual_factor      = %llu (%.2f%%)\n"
+		 "  diff               = %llu"
+		 " (within tolerance 1.5%% = %llu)\n"
+		 "  settled at vblank  = %d of %u\n"
+		 "  initial_brightness = %d\n"
+		 "  actual_brightness  = %d\n"
+		 "  max_brightness     = %d\n",
+		 kmstest_pipe_name(pipe),
+		 (unsigned long long)expected_factor, expected_factor / 100.0,
+		 (unsigned long long)actual_factor, actual_factor / 100.0,
+		 (unsigned long long)diff,
+		 DPST_FACTOR_TOLERANCE,
+		 i + 1,
+		 DPST_MAX_PHASE_IN_VBLANKS,
+		 initial_brightness,
 		 actual_brightness,
-		 abs(expected_brightness - actual_brightness),
-		 max_brightness / 100);
+		 max_brightness);
 }
 #endif
 
