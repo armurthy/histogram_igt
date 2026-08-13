@@ -33,6 +33,7 @@
 #define DPST_MAX_AGGRESSIVENESS		3
 #define DPST_FACTOR_TOLERANCE		150ULL
 #define DPST_MAX_PHASE_IN_VBLANKS	4
+#define ALGO_VER			80
 #endif
 
 #define GLOBAL_HIST_DISABLE		0
@@ -374,6 +375,7 @@ static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
 	args.Aggressiveness_Level = DPST_MAX_AGGRESSIVENESS;
 	args.Resolution_X = mode->hdisplay;
 	args.Resolution_Y = mode->vdisplay;
+	args.AlgorithmVersion = ALGO_VER;
 
 	igt_info("DPST Algorithm input: Aggressiveness=%d, resolution=%dx%d\n",
 		  (int)args.Aggressiveness_Level, (int)args.Resolution_X,
