@@ -31,11 +31,29 @@
 
 #define BACKLIGHT_PATH "/sys/class/backlight"
 #define DPST_MAX_AGGRESSIVENESS   3
+/* DPST8 only supports levels 1-3 (confirmed with algo owner); expected values are captured at the max */
+#define DPST_STATIC_IMAGE_AGGRESSIVENESS	DPST_MAX_AGGRESSIVENESS
+/* Expected values were captured with DPST 8.0 (DPST_VERSION_8_0 in the library) */
+#define DPST_STATIC_IMAGE_ALGO_VERSION		80
+/* Set IGT_DPST_CAPTURE_REF=1 to print copy-pasteable reference values instead of asserting */
+
+/* DPST library programs IET in 1.9 fixed point and backlight in x100 percent */
+#define DPST_IET_UNITY			512
+#define DPST_BACKLIGHT_UNITY		100
+/* Iterations the DPST temporal filter gets to settle on its target */
+#define DPST_CONVERGE_MAX_ITERATIONS	1000
+#define DPST_CONVERGE_STABLE_COUNT	5
 #endif
 
 #define GLOBAL_HIST_DISABLE		0
 #define GLOBAL_HIST_ENABLE		1
 #define FLIP_COUNT			20
+
+/* Reference IET values are scaled so that 10000 is a 1.0x multiplier */
+#define REF_IET_LUT_LENGTH		33
+#define REF_IET_UNITY			10000
+#define REF_IET_TOLERANCE		(REF_IET_UNITY / 100)	/* 1% */
+#define REF_BACKLIGHT_TOLERANCE		2			/* percent */
 
 /**
  * SUBTEST: global-basic
@@ -65,15 +83,178 @@
  * Description: Test to enable histogram, flip color fbs, wait for histogram event
  *              and then read the histogram data and enhance pixels by multiplying
  *              by a pixel factor using DPST algorithm with brightness adjustment
+ *
+ * SUBTEST: dpst-static-%s
+ * Description: Test to enable histogram, flip the %arg[1] static image, wait for
+ *              histogram event, compute IET LUT and backlight using DPST algorithm
+ *              and compare them against the expected values for that image
+ *
+ * arg[1]:
+ *
+ * @fuschia:	fuschia
+ * @wall:	wall
+ * @leaf:	leaf
+ * @colorbars:	color bars
+ * @winxp:	WinXP desktop
+ * @youtube:	youtube
+ * @white100:	100% white
+ * @white080:	80% white
+ * @white050:	50% white
+ * @white000:	0% white (black)
+ * @washout:	washout test
  */
 
 IGT_TEST_DESCRIPTION("This test will verify the display histogram.");
+
+struct dpst_static_image {
+	const char *name;
+	const char *filename;
+	/* Expected values at aggressiveness level 5 with EPSM disabled */
+	uint32_t backlight;	/* percent */
+	uint32_t iet_lut[REF_IET_LUT_LENGTH];
+};
+
+static const struct dpst_static_image dpst_static_images[] = {
+	{
+		.name = "fuschia",
+		.filename = "dpst_fuschia.png",
+		.backlight = 100,
+		.iet_lut = {
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000
+		},
+	},
+	{
+		.name = "wall",
+		.filename = "dpst_wall.png",
+		.backlight = 64,
+		.iet_lut = {
+			12857, 12857, 12666, 12608, 12580, 12564, 12553, 12545,
+			12698, 12676, 12658, 12643, 12631, 12621, 12522, 12436,
+			12362, 12222, 12097, 11986, 11823, 11676, 11542, 11366,
+			11204, 11055, 10869, 10697, 10538, 10389, 10251, 10121,
+			10000
+		},
+	},
+	{
+		.name = "leaf",
+		.filename = "dpst_leaf.png",
+		.backlight = 45,
+		.iet_lut = {
+			14285, 14285, 14666, 14347, 14516, 14358, 14468, 14363,
+			14444, 14366, 14303, 14137, 14000, 13786, 13603, 13445,
+			13228, 13037, 12797, 12582, 12327, 12095, 11828, 11584,
+			11361, 11155, 10966, 10744, 10582, 10432, 10251, 10121,
+			10000
+		},
+	},
+	{
+		.name = "colorbars",
+		.filename = "dpst_colorbars.png",
+		.backlight = 71,
+		.iet_lut = {
+			11428, 11428, 12000, 11739, 11612, 11794, 11702, 11636,
+			11746, 11690, 11645, 11724, 11684, 11650, 11711, 11680,
+			11653, 11629, 11538, 11456, 11383, 11317, 11200, 11092,
+			10942, 10804, 10676, 10558, 10403, 10259, 10125, 10080,
+			10000
+		},
+	},
+	{
+		.name = "winxp",
+		.filename = "dpst_winxp.png",
+		.backlight = 97,
+		.iet_lut = {
+			10000, 10000, 10000, 10000, 10000, 10256, 10212, 10181,
+			10158, 10140, 10126, 10114, 10210, 10194, 10180, 10168,
+			10157, 10148, 10139, 10132, 10188, 10179, 10171, 10163,
+			10157, 10150, 10144, 10139, 10179, 10173, 10125, 10040,
+			10000
+		},
+	},
+	{
+		.name = "youtube",
+		.filename = "dpst_youtube.png",
+		.backlight = 100,
+		.iet_lut = {
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000
+		},
+	},
+	{
+		.name = "white100",
+		.filename = "dpst_white100.png",
+		.backlight = 100,
+		.iet_lut = {
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000
+		},
+	},
+	{
+		.name = "white080",
+		.filename = "dpst_white080.png",
+		.backlight = 100,
+		.iet_lut = {
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000
+		},
+	},
+	{
+		.name = "white050",
+		.filename = "dpst_white050.png",
+		.backlight = 100,
+		.iet_lut = {
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000
+		},
+	},
+	{
+		.name = "white000",
+		.filename = "dpst_white000.png",
+		.backlight = 45,
+		.iet_lut = {
+			14285, 14285, 14666, 14347, 14516, 14358, 14468, 14363,
+			14444, 14507, 14430, 14482, 14421, 14466, 14414, 14453,
+			14409, 13925, 13426, 13046, 12641, 12275, 12000, 11693,
+			11465, 11206, 11014, 10790, 10582, 10432, 10251, 10121,
+			10000
+		},
+	},
+	{
+		.name = "washout",
+		.filename = "dpst_washout.png",
+		.backlight = 45,
+		.iet_lut = {
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
+			10000
+		},
+	},
+};
 
 typedef struct data {
 	int drm_fd;
 	igt_fb_t fb[5];
 	igt_display_t display;
 	struct drm_histogram_caps caps_data;
+	const struct dpst_static_image *static_image;
 } data_t;
 
 typedef void (*test_t)(data_t*, enum pipe, igt_output_t*, drmModePropertyBlobRes*);
@@ -452,6 +633,118 @@ static void dpst_image_enhancement_factor(data_t *data, enum pipe pipe,
 		 abs(expected_brightness - actual_brightness),
 		 max_brightness / 100);
 }
+
+/*
+ * The DPST library runs a temporal filter and its first call only initializes
+ * the context, so feed the same histogram until the IET LUT and backlight stop
+ * changing to get the final values.
+ */
+static void dpst_run_until_converged(DD_DPST_ARGS *args)
+{
+	uint32_t prev[DPST_IET_LUT_LENGTH + 1] = {0};
+	int stable = 0;
+	int i;
+
+	for (i = 0; i < DPST_CONVERGE_MAX_ITERATIONS; i++) {
+		set_histogram_data_bin(args);
+
+		if (args->DietFactor[DPST_IET_LUT_LENGTH] &&
+		    !memcmp(prev, args->DietFactor, sizeof(prev))) {
+			if (++stable == DPST_CONVERGE_STABLE_COUNT) {
+				igt_debug("DPST converged after %d iterations\n", i + 1);
+				return;
+			}
+		} else {
+			stable = 0;
+			memcpy(prev, args->DietFactor, sizeof(prev));
+		}
+	}
+
+	igt_assert_f(false, "DPST output did not converge in %d iterations\n",
+		     DPST_CONVERGE_MAX_ITERATIONS);
+}
+
+static void dpst_static_image_validate(data_t *data, enum pipe pipe,
+				       igt_output_t *output,
+				       drmModePropertyBlobRes *global_hist_blob)
+{
+	const struct dpst_static_image *img = data->static_image;
+	struct drm_histogram *histogram_data;
+	uint32_t actual_backlight;
+	DD_DPST_ARGS args = {0};
+	drmModeModeInfo *mode;
+	int mismatches = 0;
+	int i;
+
+	igt_assert(img);
+
+	mode = igt_output_get_mode(output);
+	histogram_data = (struct drm_histogram *)global_hist_blob->data;
+
+	/* Extract actual histogram values */
+	for (i = 0; i < histogram_data->nr_elements; i++)
+		args.Histogram[i] = histogram_data->max_rgb[i];
+
+	/* Expected values are captured in default configuration */
+	args.Aggressiveness_Level = DPST_STATIC_IMAGE_AGGRESSIVENESS;
+	args.Resolution_X = mode->hdisplay;
+	args.Resolution_Y = mode->vdisplay;
+	args.AlgorithmVersion = DPST_STATIC_IMAGE_ALGO_VERSION;
+
+	igt_info("DPST Algorithm input: image=%s, version=%d, Aggressiveness=%d, resolution=%dx%d\n",
+		 img->filename, (int)args.AlgorithmVersion, (int)args.Aggressiveness_Level,
+		 (int)args.Resolution_X, (int)args.Resolution_Y);
+
+	dpst_run_until_converged(&args);
+
+	igt_info("%-6s %10s %10s %10s\n", "Index", "Expected", "Actual", "Diff");
+	for (i = 0; i < REF_IET_LUT_LENGTH; i++) {
+		/* Scale library 1.9 fixed point to the reference scale */
+		int actual = ((uint64_t)args.DietFactor[i] * REF_IET_UNITY +
+			      DPST_IET_UNITY / 2) / DPST_IET_UNITY;
+		int diff = actual - (int)img->iet_lut[i];
+		bool match = abs(diff) <= REF_IET_TOLERANCE;
+
+		igt_info("%-6d %10u %10d %10d%s\n", i, img->iet_lut[i], actual,
+			 diff, match ? "" : "  <-- mismatch");
+		mismatches += !match;
+	}
+
+	actual_backlight = (args.DietFactor[DPST_IET_LUT_LENGTH] +
+			    DPST_BACKLIGHT_UNITY / 2) / DPST_BACKLIGHT_UNITY;
+	igt_info("Backlight: expected = %u%%, actual = %u%% (raw %u)\n",
+		 img->backlight, actual_backlight,
+		 args.DietFactor[DPST_IET_LUT_LENGTH]);
+
+	if (igt_check_boolean_env_var("IGT_DPST_CAPTURE_REF", false)) {
+		char lut_str[REF_IET_LUT_LENGTH * 16 + 1] = {};
+
+		for (i = 0; i < REF_IET_LUT_LENGTH; i++) {
+			int actual = ((uint64_t)args.DietFactor[i] * REF_IET_UNITY +
+				      DPST_IET_UNITY / 2) / DPST_IET_UNITY;
+			char val[16];
+
+			snprintf(val, sizeof(val), i % 8 == 7 ? "%5d,\n\t\t\t" : "%5d, ", actual);
+			strcat(lut_str, val);
+		}
+
+		igt_info("/* --- paste below into dpst_static_images[] for \"%s\" --- */\n"
+			 "\t\t.backlight = %u,\n"
+			 "\t\t.iet_lut = {\n\t\t\t%s\n\t\t},\n"
+			 "/* --- end paste --- */\n",
+			 img->name, actual_backlight, lut_str);
+		return;
+	}
+
+	igt_assert_f(mismatches == 0,
+		     "%s: %d IET LUT entries outside tolerance (%d)\n",
+		     img->name, mismatches, REF_IET_TOLERANCE);
+	igt_assert_f(abs((int)actual_backlight - (int)img->backlight) <=
+		     REF_BACKLIGHT_TOLERANCE,
+		     "%s: backlight mismatch, expected %u%%, actual %u%% (tolerance %d%%)\n",
+		     img->name, img->backlight, actual_backlight,
+		     REF_BACKLIGHT_TOLERANCE);
+}
 #endif
 
 static void create_monochrome_fbs(data_t *data, drmModeModeInfo *mode)
@@ -534,11 +827,61 @@ static void prepare_pipe(data_t *data, enum pipe pipe, igt_output_t *output, boo
 	igt_assert_f(event_detected, "Histogram event not generated.\n");
 }
 
+static void create_static_image_fbs(data_t *data, drmModeModeInfo *mode,
+				    const char *filename)
+{
+	/* Mid gray differs from every reference image, so flipping to the image always triggers an event. */
+	igt_assert(igt_create_color_fb(data->drm_fd, mode->hdisplay, mode->vdisplay,
+				       DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR,
+				       0.5, 0.5, 0.5, &data->fb[0]));
+
+	/* Scale the reference image to full screen */
+	igt_assert(igt_create_image_fb(data->drm_fd, mode->hdisplay, mode->vdisplay,
+				       DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR,
+				       filename, &data->fb[1]));
+}
+
+static void prepare_pipe_static_image(data_t *data, enum pipe pipe, igt_output_t *output)
+{
+	int i;
+	struct udev_monitor *mon = igt_watch_uevents();
+	drmModeModeInfo *mode = igt_output_get_mode(output);
+	igt_crtc_t *crtc = igt_crtc_for_pipe(&data->display, pipe);
+	bool event_detected = false;
+
+	create_static_image_fbs(data, mode, data->static_image->filename);
+
+	flip_fb(data, pipe, output, &data->fb[0]);
+	enable_and_verify_global_histogram(data, pipe);
+
+	for (i = 0; i < FLIP_COUNT && !event_detected; i++) {
+		/* Drop events caused by the gray fb, so the event we act on belongs to the image. */
+		flip_fb(data, pipe, output, &data->fb[0]);
+		igt_wait_for_vblank_count(crtc, 2);
+		igt_flush_uevents(mon);
+
+		flip_fb(data, pipe, output, &data->fb[1]);
+		event_detected = igt_global_histogram_event_detected(mon, 1);
+	}
+
+	igt_cleanup_uevents(mon);
+
+	if (!event_detected)
+		cleanup_pipe(data, pipe, output);
+
+	igt_assert_f(event_detected, "Histogram event not generated for %s.\n",
+		     data->static_image->filename);
+}
+
 static void run_global_histogram_pipeline(data_t *data, enum pipe pipe, igt_output_t *output,
 					  bool color_fb, test_t test_pixel_factor)
 {
 	drmModePropertyBlobRes *global_hist_blob = NULL;
-	prepare_pipe(data, pipe, output, color_fb);
+
+	if (data->static_image)
+		prepare_pipe_static_image(data, pipe, output);
+	else
+		prepare_pipe(data, pipe, output, color_fb);
 
 	if (!is_global_histogram_enabled(data, pipe)) {
 		igt_debug("Skipping read: global histogram is disabled on pipe %s\n",
@@ -568,14 +911,20 @@ static void run_tests_for_global_histogram(data_t *data, bool color_fb,
 		pipe = crtc->pipe;
 		for_each_valid_output_on_crtc(&data->display, crtc, output) {
 
-			if (!igt_crtc_has_prop(crtc, IGT_CRTC_HISTOGRAM_CAPS))
+			if (!igt_crtc_has_prop(crtc, IGT_CRTC_HISTOGRAM_CAPS)) {
+				igt_debug("pipe-%s-%s: no HISTOGRAM_CAPS property, skipping\n",
+					  kmstest_pipe_name(pipe), igt_output_name(output));
 				continue;
+			}
 
 			igt_display_reset(&data->display);
 
 			igt_output_set_crtc(output, igt_crtc_for_pipe(&data->display, pipe));
-			if (!intel_pipe_output_combo_valid(&data->display))
+			if (!intel_pipe_output_combo_valid(&data->display)) {
+				igt_debug("pipe-%s-%s: invalid pipe/output combo, skipping\n",
+					  kmstest_pipe_name(pipe), igt_output_name(output));
 				continue;
+			}
 
 			igt_dynamic_f("pipe-%s-%s",
 				      kmstest_pipe_name(pipe),
@@ -600,6 +949,17 @@ static void run_dpst_test(data_t *data, bool color_fb)
 {
 #ifdef HAVE_LIBDPST
 	run_tests_for_global_histogram(data, color_fb, dpst_image_enhancement_factor);
+#else
+	igt_skip("DPST algorithm library not found.\n");
+#endif
+}
+
+static void run_dpst_static_image_test(data_t *data, const struct dpst_static_image *img)
+{
+#ifdef HAVE_LIBDPST
+	data->static_image = img;
+	run_tests_for_global_histogram(data, false, dpst_static_image_validate);
+	data->static_image = NULL;
 #else
 	igt_skip("DPST algorithm library not found.\n");
 #endif
@@ -650,6 +1010,15 @@ int igt_main()
 		     "by a pixel factor using DPST algorithm with brightness adjustment.");
 	igt_subtest_with_dynamic("dpst-color")
 		run_dpst_test(&data, true);
+
+	for (int i = 0; i < ARRAY_SIZE(dpst_static_images); i++) {
+		igt_describe_f("Test to enable histogram, flip the %s static image, wait for "
+			       "histogram event, compute IET LUT and backlight using DPST "
+			       "algorithm and compare them against the expected values.",
+			       dpst_static_images[i].name);
+		igt_subtest_with_dynamic_f("dpst-static-%s", dpst_static_images[i].name)
+			run_dpst_static_image_test(&data, &dpst_static_images[i]);
+	}
 
 	igt_fixture() {
 		igt_display_fini(&data.display);
